@@ -1,0 +1,73 @@
+name: Standalone checks
+
+# toki1-pc's CI needs no other repository and no disc.  It checks syntax,
+# runs the self-contained tests listed in tools/ci/standalone_tests.txt, and
+# fetches the SPU core at its pinned commit for the two tests that use it.
+#
+# The native build and the tests that need toki1-decomp (the game's C) run
+# on a developer machine with toki1-decomp checked out next to this
+# repository: see README.md, `make -f pc/Makefile all test`.
+#
+# Runners are pinned to ubuntu-24.04; a runner upgrade must be a deliberate
+# commit.  Local mirror: tools/ci/run_ci_locally.sh (change both together).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standalone:
+    name: Syntax and self-contained tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libsdl2-dev clang
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax (Python, shell, JSON)
+        run: |
+          python -m compileall -q -x '(\.venv|build|__pycache__|\.git)' tools pc/tools
+          find tools pc -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+          python - <<'PY'
+          import json, subprocess
+          files = subprocess.run(['git', 'ls-files', '*.json'], capture_output=True,
+                                 text=True, check=True).stdout.split()
+          bad = []
+          for p in files:
+              try:
+                  json.load(open(p, encoding='utf-8'))
+              except Exception as e:      # noqa: BLE001 - report, do not crash
+                  bad.append('%s: %s' % (p, e))
+          print('%d JSON files parsed, %d failed' % (len(files), len(bad)))
+          for b in bad:
+              print('BAD', b)
+          raise SystemExit(1 if bad else 0)
+          PY
+
+      # The SPU core is not in the repository: fetch it at its pinned commit,
+      # checksum it and apply the project's patches (pc/3rd/SPU-CORE.md).
+      - name: Fetch the SPU core
+        run: pc/3rd/spu-glue/fetch.sh
+
+      - name: Self-contained tests
+        run: tools/ci/run_standalone_tests.sh python
